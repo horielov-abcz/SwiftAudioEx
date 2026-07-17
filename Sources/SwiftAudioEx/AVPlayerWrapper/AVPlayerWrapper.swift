@@ -238,39 +238,6 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
             asset = pendingAsset
             state = .loading
             
-            // Load metadata keys asynchronously and separate from playable, to allow that to execute as quickly as it can
-            let metdataKeys = ["commonMetadata", "duration", "availableChapterLocales", "availableMetadataFormats"]
-            pendingAsset.loadValuesAsynchronously(forKeys: metdataKeys, completionHandler: { [weak self] in
-                guard let self = self else { return }
-                if (pendingAsset != self.asset) { return; }
-                
-                let commonData = pendingAsset.commonMetadata
-                if (!commonData.isEmpty) {
-                    self.delegate?.AVWrapper(didReceiveCommonMetadata: commonData)
-                }
-                
-                // Indefinite-duration assets (live streams) have no chapters.
-                // Reading `duration` below without it being async-loaded would
-                // fall back to a synchronous XPC fetch that iOS 26 answers only
-                // after ~20s for live streams — executed on the main thread it
-                // hangs the whole app (watchdog 0x8BADF00D). `duration` is part
-                // of `metdataKeys` now, so this check is loaded and cheap.
-                if pendingAsset.duration.isIndefinite { return }
-                
-                if pendingAsset.availableChapterLocales.count > 0 {
-                    for locale in pendingAsset.availableChapterLocales {
-                        let chapters = pendingAsset.chapterMetadataGroups(withTitleLocale: locale, containingItemsWithCommonKeys: nil)
-                        self.delegate?.AVWrapper(didReceiveChapterMetadata: chapters)
-                    }
-                } else {
-                    for format in pendingAsset.availableMetadataFormats {
-                        let timeRange = CMTimeRange(start: CMTime(seconds: 0, preferredTimescale: 1000), end: pendingAsset.duration)
-                        let group = AVTimedMetadataGroup(items: pendingAsset.metadata(forFormat: format), timeRange: timeRange)
-                        self.delegate?.AVWrapper(didReceiveTimedMetadata: [group])
-                    }
-                }
-            })
-            
             // Load playable portion of the track and commence when ready
             let playableKeys = ["playable"]
             pendingAsset.loadValuesAsynchronously(forKeys: playableKeys, completionHandler: { [weak self] in
@@ -313,6 +280,41 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
                         self.timeToSeekToAfterLoading = nil
                         self.seek(to: initialTime)
                     }
+                    
+                    // Inspect chapters/metadata only after playback is under
+                    // way. AVAsset serializes property loading per asset, and
+                    // for live (indefinite) streams iOS 26 resolves duration/
+                    // chapter probes only after an internal ~20s timeout —
+                    // requesting them before "playable" queues item creation
+                    // (and audio start) behind that wait; reading them without
+                    // loading blocks the calling thread in a sync XPC fetch.
+                    let metdataKeys = ["commonMetadata", "duration", "availableChapterLocales", "availableMetadataFormats"]
+                    pendingAsset.loadValuesAsynchronously(forKeys: metdataKeys, completionHandler: { [weak self] in
+                        guard let self = self else { return }
+                        if (pendingAsset != self.asset) { return; }
+                        
+                        let commonData = pendingAsset.commonMetadata
+                        if (!commonData.isEmpty) {
+                            self.delegate?.AVWrapper(didReceiveCommonMetadata: commonData)
+                        }
+                        
+                        // Live streams have no chapters; their metadata arrives
+                        // via timed metadata on the player item instead.
+                        if pendingAsset.duration.isIndefinite { return }
+                        
+                        if pendingAsset.availableChapterLocales.count > 0 {
+                            for locale in pendingAsset.availableChapterLocales {
+                                let chapters = pendingAsset.chapterMetadataGroups(withTitleLocale: locale, containingItemsWithCommonKeys: nil)
+                                self.delegate?.AVWrapper(didReceiveChapterMetadata: chapters)
+                            }
+                        } else {
+                            for format in pendingAsset.availableMetadataFormats {
+                                let timeRange = CMTimeRange(start: CMTime(seconds: 0, preferredTimescale: 1000), end: pendingAsset.duration)
+                                let group = AVTimedMetadataGroup(items: pendingAsset.metadata(forFormat: format), timeRange: timeRange)
+                                self.delegate?.AVWrapper(didReceiveTimedMetadata: [group])
+                            }
+                        }
+                    })
                 }
             })
         }
