@@ -239,7 +239,7 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
             state = .loading
             
             // Load metadata keys asynchronously and separate from playable, to allow that to execute as quickly as it can
-            let metdataKeys = ["commonMetadata", "availableChapterLocales", "availableMetadataFormats"]
+            let metdataKeys = ["commonMetadata", "duration", "availableChapterLocales", "availableMetadataFormats"]
             pendingAsset.loadValuesAsynchronously(forKeys: metdataKeys, completionHandler: { [weak self] in
                 guard let self = self else { return }
                 if (pendingAsset != self.asset) { return; }
@@ -248,6 +248,14 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
                 if (!commonData.isEmpty) {
                     self.delegate?.AVWrapper(didReceiveCommonMetadata: commonData)
                 }
+                
+                // Indefinite-duration assets (live streams) have no chapters.
+                // Reading `duration` below without it being async-loaded would
+                // fall back to a synchronous XPC fetch that iOS 26 answers only
+                // after ~20s for live streams — executed on the main thread it
+                // hangs the whole app (watchdog 0x8BADF00D). `duration` is part
+                // of `metdataKeys` now, so this check is loaded and cheap.
+                if pendingAsset.duration.isIndefinite { return }
                 
                 if pendingAsset.availableChapterLocales.count > 0 {
                     for locale in pendingAsset.availableChapterLocales {
